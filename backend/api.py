@@ -7,7 +7,16 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from claimer import start as start_claimer
-from models import Base, ConvergenceLog, SessionLocal, engine, row_dict
+from models import (
+    Base,
+    ConvergenceLog,
+    NightReminderEvent,
+    SessionLocal,
+    engine,
+    event_dict,
+    row_dict,
+)
+from night import evaluate, get_config, valid_hhmm
 
 SECRET = os.environ.get("JWT_SECRET", "tunnelconv-dev-secret")
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -23,6 +32,8 @@ def seed():
     Base.metadata.create_all(engine)
     db = SessionLocal()
     try:
+        get_config(db)  # 夜间提醒单行配置，不存在则按默认建
+        db.commit()
         if db.query(ConvergenceLog).count() > 0:
             return
         now = datetime.now(timezone.utc)
@@ -147,5 +158,73 @@ def create_log():
         db.commit()
         db.refresh(row)
         return jsonify(row_dict(row)), 201
+    finally:
+        db.close()
+
+
+@app.get("/api/night-reminder")
+@require_login
+def night_reminder_status():
+    """夜间窗判定 -> 提醒灯。测量员与巡检员都可看，判定用服务端时钟。"""
+    db = SessionLocal()
+    try:
+        state = evaluate(db)
+        db.commit()
+        return jsonify(state)
+    finally:
+        db.close()
+
+
+@app.put("/api/night-reminder")
+@require_login
+def night_reminder_update():
+    if g.user["role"] != "writer":
+        return jsonify({"detail": "仅测量员可修改夜间提醒设置"}), 403
+    body = request.get_json(silent=True) or {}
+    night_start = (body.get("night_start") or "").strip()
+    night_end = (body.get("night_end") or "").strip()
+    if not valid_hhmm(night_start) or not valid_hhmm(night_end):
+        return jsonify({"detail": "夜间时段格式应为 HH:MM（24 小时制）"}), 400
+    try:
+        threshold = int(body.get("threshold"))
+    except (TypeError, ValueError):
+        return jsonify({"detail": "低样本阈值应为整数"}), 400
+    if not 1 <= threshold <= 999:
+        return jsonify({"detail": "低样本阈值应在 1-999 之间"}), 400
+    try:
+        recent_hours = float(body.get("recent_hours"))
+    except (TypeError, ValueError):
+        return jsonify({"detail": "近窗时长应为数字"}), 400
+    if not 0.1 <= recent_hours <= 72:
+        return jsonify({"detail": "近窗时长应在 0.1-72 小时之间"}), 400
+    db = SessionLocal()
+    try:
+        cfg = get_config(db)
+        cfg.night_start = night_start
+        cfg.night_end = night_end
+        cfg.threshold = threshold
+        cfg.recent_hours = recent_hours
+        cfg.updated_by = g.user["username"]
+        cfg.updated_at = datetime.now(timezone.utc)
+        state = evaluate(db)  # 改完立即按新设置重判，亮灭边沿记履历
+        db.commit()
+        return jsonify(state)
+    finally:
+        db.close()
+
+
+@app.get("/api/night-reminder/events")
+@require_login
+def night_reminder_events():
+    """提醒流水，巡检员只读。"""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(NightReminderEvent)
+            .order_by(NightReminderEvent.id.desc())
+            .limit(200)
+            .all()
+        )
+        return jsonify([event_dict(r) for r in rows])
     finally:
         db.close()

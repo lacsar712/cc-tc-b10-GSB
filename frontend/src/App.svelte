@@ -1,6 +1,11 @@
 <script>
+  import NightReminder from "./NightReminder.svelte";
+
   let session = null;
   let logs = [];
+  let night = null;
+  let nightEvents = [];
+  let view = "logs";
   let loginUser = "surveyor";
   let loginPass = "surv123456";
   let chainage = "";
@@ -15,6 +20,13 @@
     return session ? { Authorization: "Bearer " + session.token } : {};
   }
 
+  async function refreshNight() {
+    const res = await fetch("/api/night-reminder", { headers: headers() });
+    if (res.ok) night = await res.json();
+    const ev = await fetch("/api/night-reminder/events", { headers: headers() });
+    if (ev.ok) nightEvents = await ev.json();
+  }
+
   async function refresh() {
     if (!session) return;
     const res = await fetch("/api/logs", { headers: headers() });
@@ -23,6 +35,7 @@
       return;
     }
     if (res.ok) logs = await res.json();
+    await refreshNight();
   }
 
   async function login() {
@@ -54,6 +67,9 @@
     if (timer) clearInterval(timer);
     session = null;
     logs = [];
+    night = null;
+    nightEvents = [];
+    view = "logs";
     localStorage.removeItem("tunnel_session");
   }
 
@@ -101,7 +117,22 @@
     color: #f5f5f4;
   }
   main { max-width: 960px; margin: 0 auto; padding: 1.5rem; }
-  h1 { color: #fbbf24; margin: 0 0 0.25rem; }
+  h1 { color: #fbbf24; margin: 0; font-size: 1.4rem; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; margin-bottom: 0.25rem; flex-wrap: wrap;
+  }
+  nav { display: flex; gap: 0.5rem; }
+  button.nav {
+    background: #44403c; color: #e7e5e4; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 0.4rem;
+  }
+  button.nav.active { background: #d97706; color: #fff; }
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #57534e; display: inline-block;
+  }
+  .dot.lit { background: #fbbf24; box-shadow: 0 0 8px 2px rgba(251, 191, 36, 0.7); }
   .sub { color: #a8a29e; margin-bottom: 1.25rem; }
   section {
     background: #292524; border: 1px solid #44403c; border-radius: 8px;
@@ -127,7 +158,18 @@
 </style>
 
 <main>
-  <h1>隧道收敛测缝台</h1>
+  <header class="topbar">
+    <h1>隧道收敛测缝台</h1>
+    {#if session}
+      <nav>
+        <button class="nav {view === 'logs' ? 'active' : ''}" on:click={() => (view = "logs")}>测量列表</button>
+        <button class="nav {view === 'night' ? 'active' : ''}" on:click={() => (view = "night")}>
+          夜间提醒
+          <span class="dot {night && night.light_on ? 'lit' : ''}" title="夜间提醒灯"></span>
+        </button>
+      </nav>
+    {/if}
+  </header>
   {#if !session}
     <p class="sub">测量员提交桩号与收敛毫米值，接口进程内线程认领后出结论。登录框已预填可写账号 surveyor / surv123456。</p>
     <section>
@@ -144,38 +186,42 @@
       <button class="secondary" on:click={logout}>退出</button>
       <button class="secondary" disabled={loading} on:click={refresh}>刷新列表</button>
     </section>
-    {#if isWriter}
+    {#if view === "logs"}
+      {#if isWriter}
+        <section>
+          <label>里程桩号</label>
+          <input placeholder="例如 K20+050" bind:value={chainage} />
+          <label>收敛（毫米，可正可负）</label>
+          <input type="number" step="0.1" bind:value={deltaMm} />
+          <button disabled={loading} on:click={submit}>提交（进入待认领）</button>
+          {#if error}<p class="err">{error}</p>{/if}
+        </section>
+      {/if}
       <section>
-        <label>里程桩号</label>
-        <input placeholder="例如 K20+050" bind:value={chainage} />
-        <label>收敛（毫米，可正可负）</label>
-        <input type="number" step="0.1" bind:value={deltaMm} />
-        <button disabled={loading} on:click={submit}>提交（进入待认领）</button>
-        {#if error}<p class="err">{error}</p>{/if}
+        <table>
+          <thead>
+            <tr><th>编号</th><th>桩号</th><th>收敛mm</th><th>状态</th><th>结论</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            {#each logs as row}
+              <tr>
+                <td>{row.id}</td>
+                <td>{row.chainage}</td>
+                <td>{row.delta_mm}</td>
+                <td><span class="tag {row.status === 'pending' ? 'pending' : 'ok'}">{row.status === 'pending' ? '待处理' : '已完成'}</span></td>
+                <td>
+                  {#if row.verdict}
+                    <span class="tag {row.verdict === '合格' ? 'ok' : 'bad'}">{row.verdict}</span>
+                  {:else}—{/if}
+                </td>
+                <td>{row.reason ?? "—"}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </section>
+    {:else}
+      <NightReminder {night} events={nightEvents} {isWriter} headersFn={headers} onSaved={refreshNight} />
     {/if}
-    <section>
-      <table>
-        <thead>
-          <tr><th>编号</th><th>桩号</th><th>收敛mm</th><th>状态</th><th>结论</th><th>说明</th></tr>
-        </thead>
-        <tbody>
-          {#each logs as row}
-            <tr>
-              <td>{row.id}</td>
-              <td>{row.chainage}</td>
-              <td>{row.delta_mm}</td>
-              <td><span class="tag {row.status === 'pending' ? 'pending' : 'ok'}">{row.status === 'pending' ? '待处理' : '已完成'}</span></td>
-              <td>
-                {#if row.verdict}
-                  <span class="tag {row.verdict === '合格' ? 'ok' : 'bad'}">{row.verdict}</span>
-                {:else}—{/if}
-              </td>
-              <td>{row.reason ?? "—"}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </section>
   {/if}
 </main>
